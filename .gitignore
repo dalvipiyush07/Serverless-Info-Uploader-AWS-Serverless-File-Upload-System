@@ -1,207 +1,412 @@
-# Byte-compiled / optimized / DLL files
-__pycache__/
-*.py[codz]
-*$py.class
+import json
+import boto3
+import os
+import uuid
+import base64
 
-# C extensions
-*.so
+# Initialize AWS clients
+s3_client = boto3.client('s3')
+dynamodb = boto3.resource('dynamodb')
 
-# Distribution / packaging
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-share/python-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
-MANIFEST
+# Set your specific bucket and table names
+BUCKET_NAME = 'thala0707'
+TABLE_NAME = 'lambda'
+table = dynamodb.Table(TABLE_NAME)
 
-# PyInstaller
-#  Usually these files are written by a python script from a template
-#  before PyInstaller builds the exe, so as to inject date/other infos into it.
-*.manifest
-*.spec
+def lambda_handler(event, context):
+    # Handle GET request - show upload form
+    if event['requestContext']['http']['method'] == 'GET':
+        return {
+            'statusCode': 200,
+            'headers': {
+                'Content-Type': 'text/html',
+                'Access-Control-Allow-Origin': '*'
+            },
+            'body': show_upload_form()
+        }
+    
+    # Handle POST request - process file upload
+    elif event['requestContext']['http']['method'] == 'POST':
+        try:
+            # Parse the multipart form data
+            content_type = event['headers'].get('content-type', event['headers'].get('Content-Type', ''))
+            if 'multipart/form-data' not in content_type:
+                return {
+                    'statusCode': 400,
+                    'headers': {
+                        'Access-Control-Allow-Origin': '*'
+                    },
+                    'body': json.dumps({'error': 'Invalid content type. Expected multipart/form-data'})
+                }
+            
+            # Parse the body (base64 encoded if isBase64Encoded is true)
+            body = event['body']
+            if event.get('isBase64Encoded', False):
+                body = base64.b64decode(body)
+            else:
+                body = body.encode('utf-8')
+            
+            # Parse multipart form data
+            boundary = content_type.split("boundary=")[1].encode('utf-8')
+            parts = body.split(b'--' + boundary)
+            
+            file_data = None
+            filename = None
+            description = None
+            
+            for part in parts:
+                if b'Content-Disposition: form-data;' in part:
+                    header_end = part.find(b'\r\n\r\n')
+                    if header_end == -1:
+                        continue
+                    
+                    headers = part[:header_end].decode('utf-8')
+                    content = part[header_end+4:].rstrip(b'\r\n')
+                    
+                    if 'name="file"' in headers and 'filename="' in headers:
+                        # Extract filename
+                        filename_start = headers.find('filename="') + 10
+                        filename_end = headers.find('"', filename_start)
+                        filename = headers[filename_start:filename_end]
+                        file_data = content
+                    
+                    elif 'name="description"' in headers:
+                        description = content.decode('utf-8').strip()
+            
+            if not filename or not file_data:
+                return {
+                    'statusCode': 400,
+                    'headers': {
+                        'Access-Control-Allow-Origin': '*'
+                    },
+                    'body': json.dumps({'error': 'File not found in request'})
+                }
+            
+            # Upload file to S3
+            file_id = str(uuid.uuid4())
+            file_key = f"uploads/{file_id}_{filename}"
+            
+            s3_client.put_object(
+                Bucket=BUCKET_NAME,
+                Key=file_key,
+                Body=file_data,
+                ContentType='application/octet-stream'
+            )
+            
+            # Generate a presigned URL for the uploaded file
+            presigned_url = s3_client.generate_presigned_url(
+                'get_object',
+                Params={'Bucket': BUCKET_NAME, 'Key': file_key},
+                ExpiresIn=3600
+            )
+            
+            # Save metadata to DynamoDB
+            table.put_item(
+                Item={
+                    'id': file_id,
+                    'filename': filename,
+                    'description': description or '',
+                    's3_key': file_key,
+                    'upload_date': str(context.aws_request_id),
+                    'presigned_url': presigned_url
+                }
+            )
+            
+            return {
+                'statusCode': 200,
+                'headers': {
+                    'Content-Type': 'text/html',
+                    'Access-Control-Allow-Origin': '*'
+                },
+                'body': show_success_message(filename, file_id, presigned_url)
+            }
+            
+        except Exception as e:
+            return {
+                'statusCode': 500,
+                'headers': {
+                    'Access-Control-Allow-Origin': '*'
+                },
+                'body': json.dumps({'error': str(e)})
+            }
+    
+    # Handle other methods
+    else:
+        return {
+            'statusCode': 405,
+            'headers': {
+                'Access-Control-Allow-Origin': '*'
+            },
+            'body': json.dumps({'error': 'Method not allowed'})
+        }
 
-# Installer logs
-pip-log.txt
-pip-delete-this-directory.txt
+def show_upload_form():
+    return """
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>File Upload to Thala0707</title>
+        <meta charset="UTF-8">
+        <style>
+            * {
+                box-sizing: border-box;
+                margin: 0;
+                padding: 0;
+                font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            }
+            body {
+                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                min-height: 100vh;
+                display: flex;
+                justify-content: center;
+                align-items: center;
+                padding: 20px;
+            }
+            .container {
+                background: white;
+                border-radius: 10px;
+                box-shadow: 0 15px 30px rgba(0, 0, 0, 0.1);
+                width: 100%;
+                max-width: 500px;
+                padding: 30px;
+            }
+            h2 {
+                text-align: center;
+                color: #333;
+                margin-bottom: 20px;
+                font-weight: 600;
+            }
+            .logo {
+                text-align: center;
+                font-size: 24px;
+                font-weight: bold;
+                color: #667eea;
+                margin-bottom: 20px;
+            }
+            .form-group {
+                margin-bottom: 20px;
+            }
+            label {
+                display: block;
+                margin-bottom: 8px;
+                color: #555;
+                font-weight: 500;
+            }
+            input[type="text"], input[type="file"] {
+                width: 100%;
+                padding: 12px 15px;
+                border: 1px solid #ddd;
+                border-radius: 5px;
+                font-size: 16px;
+                transition: border-color 0.3s;
+            }
+            input[type="text"]:focus, input[type="file"]:focus {
+                border-color: #667eea;
+                outline: none;
+            }
+            button {
+                width: 100%;
+                padding: 12px;
+                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                color: white;
+                border: none;
+                border-radius: 5px;
+                font-size: 16px;
+                cursor: pointer;
+                transition: transform 0.3s, box-shadow 0.3s;
+                font-weight: 600;
+            }
+            button:hover {
+                transform: translateY(-2px);
+                box-shadow: 0 5px 15px rgba(0, 0, 0, 0.1);
+            }
+            .instructions {
+                background: #f8f9fa;
+                padding: 15px;
+                border-radius: 5px;
+                margin-top: 25px;
+                font-size: 14px;
+                color: #666;
+            }
+            .instructions h3 {
+                margin-bottom: 10px;
+                color: #333;
+            }
+            .instructions ul {
+                padding-left: 20px;
+            }
+            .instructions li {
+                margin-bottom: 5px;
+            }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <div class="logo">Thala0707 Uploader</div>
+            <h2>Upload a File to AWS S3</h2>
+            <form method="POST" enctype="multipart/form-data">
+                <div class="form-group">
+                    <label for="description">Description:</label>
+                    <input type="text" id="description" name="description" placeholder="Enter file description">
+                </div>
+                <div class="form-group">
+                    <label for="file">Select file to upload:</label>
+                    <input type="file" id="file" name="file" required>
+                </div>
+                <button type="submit">Upload File</button>
+            </form>
+            
+            <div class="instructions">
+                <h3>How this works:</h3>
+                <ul>
+                    <li>Files are uploaded to S3 bucket: thala0707</li>
+                    <li>File metadata is stored in DynamoDB table: lambda</li>
+                    <li>You'll get a temporary download link after upload</li>
+                    <li>The link expires after 1 hour for security</li>
+                </ul>
+            </div>
+        </div>
+    </body>
+    </html>
+    """
 
-# Unit test / coverage reports
-htmlcov/
-.tox/
-.nox/
-.coverage
-.coverage.*
-.cache
-nosetests.xml
-coverage.xml
-*.cover
-*.py.cover
-.hypothesis/
-.pytest_cache/
-cover/
+def show_success_message(filename, file_id, presigned_url):
+    return f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Upload Successful</title>
+        <meta charset="UTF-8">
+        <style>
+            * {{
+                box-sizing: border-box;
+                margin: 0;
+                padding: 0;
+                font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            }}
+            body {{
+                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                min-height: 100vh;
+                display: flex;
+                justify-content: center;
+                align-items: center;
+                padding: 20px;
+            }}
+            .container {{
+                background: white;
+                border-radius: 10px;
+                box-shadow: 0 15px 30px rgba(0, 0, 0, 0.1);
+                width: 100%;
+                max-width: 600px;
+                padding: 30px;
+                text-align: center;
+            }}
+            h2 {{
+                color: #4CAF50;
+                margin-bottom: 20px;
+                font-weight: 600;
+            }}
+            .logo {{
+                text-align: center;
+                font-size: 24px;
+                font-weight: bold;
+                color: #667eea;
+                margin-bottom: 20px;
+            }}
+            .success-icon {{
+                font-size: 60px;
+                color: #4CAF50;
+                margin-bottom: 20px;
+            }}
+            .details {{
+                text-align: left;
+                background: #f8f9fa;
+                padding: 20px;
+                border-radius: 5px;
+                margin: 20px 0;
+            }}
+            .details p {{
+                margin-bottom: 10px;
+                word-break: break-all;
+            }}
+            .details strong {{
+                color: #333;
+            }}
+            a.download-btn {{
+                display: inline-block;
+                padding: 12px 25px;
+                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                color: white;
+                text-decoration: none;
+                border-radius: 5px;
+                font-weight: 600;
+                margin: 10px 0;
+                transition: transform 0.3s, box-shadow 0.3s;
+            }}
+            a.download-btn:hover {{
+                transform: translateY(-2px);
+                box-shadow: 0 5px 15px rgba(0, 0, 0, 0.1);
+            }}
+            a.upload-another {{
+                display: inline-block;
+                margin-top: 15px;
+                color: #667eea;
+                text-decoration: none;
+                font-weight: 500;
+            }}
+            a.upload-another:hover {{
+                text-decoration: underline;
+            }}
+            .note {{
+                margin-top: 20px;
+                padding: 15px;
+                background: #fff3cd;
+                border-left: 4px solid #ffc107;
+                color: #856404;
+                text-align: left;
+                border-radius: 4px;
+            }}
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <div class="logo">Thala0707 Uploader</div>
+            <div class="success-icon">✓</div>
+            <h2>File Uploaded Successfully!</h2>
+            
+            <div class="details">
+                <p><strong>Filename:</strong> {filename}</p>
+                <p><strong>File ID:</strong> {file_id}</p>
+                <p><strong>Download URL:</strong> <a href="{presigned_url}" target="_blank">Click to download</a></p>
+            </div>
+            
+            <a href="{presigned_url}" class="download-btn" target="_blank">Download File</a>
+            <br>
+            <a href="/" class="upload-another">Upload Another File</a>
+            
+            <div class="note">
+                <strong>Note:</strong> This download link will expire in 1 hour.
+                For permanent access, you would need to implement a different approach.
+            </div>
+        </div>
+    </body>
+    </html>
+    """
 
-# Translations
-*.mo
-*.pot
-
-# Django stuff:
-*.log
-local_settings.py
-db.sqlite3
-db.sqlite3-journal
-
-# Flask stuff:
-instance/
-.webassets-cache
-
-# Scrapy stuff:
-.scrapy
-
-# Sphinx documentation
-docs/_build/
-
-# PyBuilder
-.pybuilder/
-target/
-
-# Jupyter Notebook
-.ipynb_checkpoints
-
-# IPython
-profile_default/
-ipython_config.py
-
-# pyenv
-#   For a library or package, you might want to ignore these files since the code is
-#   intended to run in multiple environments; otherwise, check them in:
-# .python-version
-
-# pipenv
-#   According to pypa/pipenv#598, it is recommended to include Pipfile.lock in version control.
-#   However, in case of collaboration, if having platform-specific dependencies or dependencies
-#   having no cross-platform support, pipenv may install dependencies that don't work, or not
-#   install all needed dependencies.
-#Pipfile.lock
-
-# UV
-#   Similar to Pipfile.lock, it is generally recommended to include uv.lock in version control.
-#   This is especially recommended for binary packages to ensure reproducibility, and is more
-#   commonly ignored for libraries.
-#uv.lock
-
-# poetry
-#   Similar to Pipfile.lock, it is generally recommended to include poetry.lock in version control.
-#   This is especially recommended for binary packages to ensure reproducibility, and is more
-#   commonly ignored for libraries.
-#   https://python-poetry.org/docs/basic-usage/#commit-your-poetrylock-file-to-version-control
-#poetry.lock
-#poetry.toml
-
-# pdm
-#   Similar to Pipfile.lock, it is generally recommended to include pdm.lock in version control.
-#   pdm recommends including project-wide configuration in pdm.toml, but excluding .pdm-python.
-#   https://pdm-project.org/en/latest/usage/project/#working-with-version-control
-#pdm.lock
-#pdm.toml
-.pdm-python
-.pdm-build/
-
-# pixi
-#   Similar to Pipfile.lock, it is generally recommended to include pixi.lock in version control.
-#pixi.lock
-#   Pixi creates a virtual environment in the .pixi directory, just like venv module creates one
-#   in the .venv directory. It is recommended not to include this directory in version control.
-.pixi
-
-# PEP 582; used by e.g. github.com/David-OConnor/pyflow and github.com/pdm-project/pdm
-__pypackages__/
-
-# Celery stuff
-celerybeat-schedule
-celerybeat.pid
-
-# SageMath parsed files
-*.sage.py
-
-# Environments
-.env
-.envrc
-.venv
-env/
-venv/
-ENV/
-env.bak/
-venv.bak/
-
-# Spyder project settings
-.spyderproject
-.spyproject
-
-# Rope project settings
-.ropeproject
-
-# mkdocs documentation
-/site
-
-# mypy
-.mypy_cache/
-.dmypy.json
-dmypy.json
-
-# Pyre type checker
-.pyre/
-
-# pytype static type analyzer
-.pytype/
-
-# Cython debug symbols
-cython_debug/
-
-# PyCharm
-#  JetBrains specific template is maintained in a separate JetBrains.gitignore that can
-#  be found at https://github.com/github/gitignore/blob/main/Global/JetBrains.gitignore
-#  and can be added to the global gitignore or merged into this file.  For a more nuclear
-#  option (not recommended) you can uncomment the following to ignore the entire idea folder.
-#.idea/
-
-# Abstra
-# Abstra is an AI-powered process automation framework.
-# Ignore directories containing user credentials, local state, and settings.
-# Learn more at https://abstra.io/docs
-.abstra/
-
-# Visual Studio Code
-#  Visual Studio Code specific template is maintained in a separate VisualStudioCode.gitignore 
-#  that can be found at https://github.com/github/gitignore/blob/main/Global/VisualStudioCode.gitignore
-#  and can be added to the global gitignore or merged into this file. However, if you prefer, 
-#  you could uncomment the following to ignore the entire vscode folder
-# .vscode/
-
-# Ruff stuff:
-.ruff_cache/
-
-# PyPI configuration file
-.pypirc
-
-# Cursor
-#  Cursor is an AI-powered code editor. `.cursorignore` specifies files/directories to
-#  exclude from AI features like autocomplete and code analysis. Recommended for sensitive data
-#  refer to https://docs.cursor.com/context/ignore-files
-.cursorignore
-.cursorindexingignore
-
-# Marimo
-marimo/_static/
-marimo/_lsp/
-__marimo__/
+# For local testing
+if __name__ == "__main__":
+    # Mock event for testing
+    test_event = {
+        'requestContext': {
+            'http': {
+                'method': 'GET'
+            }
+        },
+        'headers': {}
+    }
+    
+    # Test the function
+    result = lambda_handler(test_event, None)
+    print("Status Code:", result['statusCode'])
+    print("Headers:", result['headers'])
+    print("Body length:", len(result['body']))
