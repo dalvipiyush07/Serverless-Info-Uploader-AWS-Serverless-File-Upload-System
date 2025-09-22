@@ -22,7 +22,7 @@ The architecture ensures cost-effectiveness, automatic scaling, and minimal main
 
 
 ## 1. Architecture Overview
-![](./img/Architecture%20O.png)
+![](./img/overview2.jpg)
 
 | Component     | AWS Service   | Purpose                                         |
 |---------------|---------------|-------------------------------------------------|
